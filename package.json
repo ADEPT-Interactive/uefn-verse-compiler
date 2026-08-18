@@ -1,0 +1,50 @@
+{
+  "name": "uefn-verse-compiler",
+  "version": "0.1.0",
+  "description": "Independent agent-friendly client for compiling Verse projects against a local UEFN editor session.",
+  "type": "module",
+  "bin": {
+    "uefn-verse-compiler": "dist/cli.js"
+  },
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "skills",
+    "docs",
+    "README.md",
+    "LICENSE",
+    "SECURITY.md"
+  ],
+  "engines": {
+    "node": ">=22.12.0 <25"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "tsx --test \"test/**/*.test.ts\"",
+    "check": "npm run build && npm test",
+    "verse-compile": "tsx src/cli.ts",
+    "prepack": "npm run build"
+  },
+  "keywords": [
+    "uefn",
+    "verse",
+    "fortnite-creative",
+    "compiler",
+    "ai-agents",
+    "developer-tools"
+  ],
+  "author": "AD3PT Interactive Inc. (ADEPT Interactive / ADEPT)",
+  "license": "MIT",
+  "sideEffects": false,
+  "devDependencies": {
+    "@types/node": "^22.13.4",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3"
+  }
+}
