@@ -43,7 +43,7 @@
   "license": "MIT",
   "sideEffects": false,
   "devDependencies": {
-    "@types/node": "^22.13.4",
+    "@types/node": "^26.2.0",
     "tsx": "^4.19.2",
     "typescript": "^5.7.3"
   }
