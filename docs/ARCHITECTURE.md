@@ -1,16 +1,18 @@
 # Architecture
 
-The client has five small layers:
+The package has two deliberately separate execution paths:
 
-    UEFN process inspection
-            |
-    loopback listener discovery and project/session selection
-            |
-    raw TCP Content-Length JSON transport
-            |
-    compileProject request and retained notifications
-            |
-    authoritative numErrors result and normalized diagnostics
+    project descriptor + generated .vproject/digests
+                    |
+          read-only project metadata
+             /                    \
+            /                      \
+    semantic check              authoritative compile
+    Epic Verse LSP               UEFN Workflow Server
+    stdio JSON-RPC               loopback TCP JSON
+    diagnostics only             final numeric numErrors
+
+The backend capability model is explicit. A backend name never implies authority. The LSP backend reports semantic analysis and diagnostics, but `authoritativeCompilation: no`; the Workflow backend reports `authoritativeCompilation: yes` and requires a UEFN process. GUI coupling for the Workflow service remains unknown.
 
 ## Discovery
 
@@ -28,10 +30,18 @@ The client sends a JSON compileProject request framed as:
 
 Notifications may arrive before the final response. The client retains them for library consumers and optional debug output. The final response must identify type: 2, command: compileProject, and a numeric numErrors. numErrors: 0 is the only clean compile result.
 
+The semantic path starts the installed Epic `verse-lsp.exe` as a child process with stdio pipes. It sends standard LSP `initialize`/`initialized`, replies to dynamic client requests, sends the generated workspace folder topology, opens source files, and sends full-text `didChange` notifications. It then requests `workspace/diagnostic` and collects `textDocument/publishDiagnostics`. LSP ranges are converted from zero-based to the package's one-based diagnostic shape. This path never produces an authoritative Workflow compile result.
+
+Project metadata discovery is read-only. It identifies the `.uefnproject`, generated `.vproject`, generated code-workspace folders, source `.verse` files, project asset reflection output, and built-in Verse/UnrealEngine/Fortnite digest packages. Missing or semantically invalid generated metadata is reported separately from source diagnostics.
+
 ## Recovery and diagnostics
 
 Protocol framing, JSON, size, timeout, and connection failures are reported as client failures. After a failed discovered session, the client invalidates that attempt, re-runs discovery, and retries once. This handles UEFN restarts and stale process/listener snapshots without hiding a compiler error. Compiler messages are normalized when file, line, column, severity, or code fields are available.
 
+LSP shutdown sends `shutdown`, then `exit`, and closes the child stdio streams. Some Epic language-server builds report a non-zero process exit value during this normal protocol sequence; the semantic result is based on JSON-RPC diagnostics and completion, not the child exit value. A bounded quiet-period fallback prevents a server that omits an empty clean-source publication from hanging forever.
+
 ## Boundaries
 
-The core has no application UI, Electron, storefront, entitlement, renderer, or launcher dependency. Windows discovery is isolated behind CompilerDiscoverySystem so mocked tests can cover selection and the transport can be tested without UEFN. Additional platform strategies could be added later, but the current runtime support remains Windows only.
+The core has no application UI, Electron, storefront, entitlement, renderer, or launcher dependency. Windows discovery is isolated behind CompilerDiscoverySystem so mocked tests can cover selection and the transport can be tested without UEFN. Toolchain discovery is similarly injectable for CI. Additional platform strategies could be added later, but the current runtime support remains Windows only.
+
+The semantic path is intentionally not a `compile` fallback. `compile` continues to use the existing Workflow backend and its loopback-only, fail-closed session selection. `check` can be useful when UEFN is unavailable, but requires generated project metadata and an installed Epic language server; it does not make a claim about a headless authoritative build.

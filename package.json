@@ -1,7 +1,7 @@
 {
   "name": "uefn-verse-compiler",
   "version": "0.1.0",
-  "description": "Independent agent-friendly client for compiling Verse projects against a local UEFN editor session.",
+  "description": "Independent agent-friendly Verse semantic checker and authoritative compiler client for local UEFN projects.",
   "type": "module",
   "bin": {
     "uefn-verse-compiler": "dist/cli.js"

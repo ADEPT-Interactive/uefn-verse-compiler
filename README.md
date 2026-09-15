@@ -1,6 +1,6 @@
 # UEFN Verse Compiler
 
-An independent, unofficial interoperability client for compiling Verse projects against a locally running Unreal Editor for Fortnite session. It is designed for developers, terminal automation, and AI coding agents that need authoritative live compiler diagnostics.
+An independent, unofficial interoperability client for checking Verse projects with Epic's locally installed language server and compiling them authoritatively through a locally running Unreal Editor for Fortnite session. It is designed for developers, terminal automation, and AI coding agents that need a clear boundary between fast semantic feedback and a real UEFN build.
 
 This project is not affiliated with, endorsed by, or sponsored by Epic Games. Fortnite, Unreal Editor for Fortnite, UEFN, Verse, Unreal Engine, and Epic Games are trademarks or properties of their respective owners.
 
@@ -9,16 +9,19 @@ This project is not affiliated with, endorsed by, or sponsored by Epic Games. Fo
 - Discovers UEFN-owned loopback compiler sessions without assuming one fixed port.
 - Matches a requested project or explicit UEFN process when multiple editor instances are open.
 - Compiles through the real local UEFN Workflow Server.
+- Performs a separate semantic `check` through the installed Epic Verse language server when generated project metadata is available.
+- Reports installed toolchain components and backend capabilities through `doctor` and `backends`.
 - Retains protocol notifications and normalizes diagnostics when locations are provided.
 - Fails closed on ambiguous sessions and rejects non-loopback endpoint overrides.
 
-Static syntax checking is not a substitute for the live UEFN compiler. A clean result from this tool means the live compiler returned numErrors: 0; it does not prove gameplay, publishing, moderation, or marketplace acceptance.
+`check` means semantic analysis: parsing, symbol/type/effect analysis, and related diagnostics from the Epic language server. It does not produce the same authoritative result or proven artifacts as UEFN's Build Verse Code. `compile` means the existing UEFN Workflow Server path; only its final numeric `numErrors` field is treated as authoritative. Neither command proves gameplay, publishing, moderation, or marketplace acceptance.
 
 ## Requirements
 
 - Windows. The runtime discovery strategy is Windows-specific.
 - Node.js 22.12.0 or a later Node 22 release below 25.
-- UEFN installed and running with the intended Verse-enabled project open.
+- For `compile`: UEFN installed and running with the intended Verse-enabled project open.
+- For `check`: the Epic Verse language-server executable and the project's generated `.vproject`/digest metadata must be available. UEFN is not launched by this command, and VS Code is not required.
 
 VS Code is not required. Epic's Verse extension was used as an interoperability reference during development, but this client does not launch VS Code and does not require a VS Code installation at runtime.
 
@@ -31,6 +34,9 @@ From a clone of this repository:
     npm run verse-compile -- status --project "C:\Path\Project.uefnproject"
     npm run verse-compile -- compile --project "C:\Path\Project.uefnproject"
     npm run verse-compile -- compile --project "C:\Path\Project.uefnproject" --json
+    npm run verse-compile -- check --project "C:\Path\Project.uefnproject" --json
+    npm run verse-compile -- doctor --project "C:\Path\Project.uefnproject"
+    npm run verse-compile -- backends --json
 
 After installing a built package, the equivalent command is:
 
@@ -43,8 +49,13 @@ Normal usage does not require a host or port. For deterministic local tests only
     uefn-verse-compiler discover [--project <path>] [--process-id <pid>] [--json]
     uefn-verse-compiler status   [--project <path>] [--process-id <pid>] [--json]
     uefn-verse-compiler compile  [--project <path>] [--process-id <pid>] [--timeout-ms <ms>] [--json] [--debug]
+    uefn-verse-compiler check    --project <path> [--timeout-ms <ms>] [--lsp-path <path>] [--json]
+    uefn-verse-compiler doctor   [--project <path>] [--lsp-path <path>] [--include-paths] [--json]
+    uefn-verse-compiler backends [--project <path>] [--lsp-path <path>] [--include-paths] [--json]
 
 discover reports candidate sessions. status reports whether discovery found a candidate, but does not claim that compilation succeeded. compile sends the live compileProject request and uses the final numeric numErrors field as its success authority.
+
+check reports semantic diagnostics and always marks its JSON result with `resultType: "semantic-check"`, `semantic: true`, and `authoritative: false`. A clean semantic check is not an authoritative UEFN build. doctor inspects local installation/runtime/project state; backends reports only capabilities supported by the current evidence. Neither command launches or modifies UEFN.
 
 Exit codes are deterministic:
 
@@ -56,6 +67,8 @@ Exit codes are deterministic:
 | 3 | Multiple UEFN/compiler sessions are ambiguous |
 | 4 | Invalid CLI arguments |
 | 5 | Client, protocol, timeout, or other internal compiler request failure |
+
+For `check`, code 1 means source semantic errors, code 2 means missing/unusable project metadata or language-server state (including generated metadata diagnostics), and code 5 means a client or protocol failure. `doctor` and `backends` return code 0 after producing their report, even when a backend is unavailable.
 
 ## JSON output
 
@@ -84,6 +97,8 @@ Normal compile --json output has this stable shape:
 
 Raw protocol messages and notifications are intentionally omitted from normal JSON. Add --debug when protocol investigation requires the retained messages; sensitive-looking fields are redacted in that output.
 
+Semantic check JSON uses the same schema-version field but a distinct `resultType` and includes separate `sourceDiagnostics` and `metadataDiagnostics` arrays. It must not be consumed as a `compile` result.
+
 ## Multiple UEFN instances
 
 The client identifies UEFN processes, inspects only loopback listeners owned by candidate processes, and matches the requested project where possible. Use --project for project-specific selection or --process-id when the caller already has authoritative process identity. If more than one session remains possible, discovery returns multiple-sessions-ambiguous and the CLI exits with code 3.
@@ -104,7 +119,7 @@ The protocol uses raw local TCP with Content-Length-framed JSON. The client does
 
 ## Agent integration
 
-The self-contained agent instructions are in skills/compile-verse/SKILL.md. They describe when to use live compilation, how to handle unavailable or ambiguous sessions, how to iterate through diagnostics, and why static analysis cannot be treated as equivalent.
+The self-contained agent instructions are in skills/compile-verse/SKILL.md. They describe when to use semantic `check` for fast feedback, when live `compile` is required, how to handle unavailable or ambiguous sessions, and why semantic analysis cannot be treated as equivalent.
 
 ## Security
 
@@ -114,7 +129,7 @@ See SECURITY.md. In particular, compiler connections and explicit overrides are 
 
 This tool interoperates with a local UEFN workflow service that is not necessarily a stable public Epic API. The workflow protocol may change between UEFN releases. Discovery, protocol bounds, and compatibility tests reduce avoidable breakage, but compatibility with future UEFN releases is not guaranteed.
 
-See docs/COMPATIBILITY.md for the observed validation baseline and docs/ARCHITECTURE.md for the maintenance model. The project does not redistribute Epic binaries, the Verse extension, language-server files, Fortnite assets, UEFN assets, or captured proprietary implementation code.
+See docs/COMPATIBILITY.md for the observed validation baseline, docs/ARCHITECTURE.md for the maintenance model, and docs/HEADLESS-VERSE-RESEARCH.md for the evidence and remaining headless questions. The project does not redistribute Epic binaries, the Verse extension, language-server files, Fortnite assets, UEFN assets, or captured proprietary implementation code.
 
 ## Development
 
@@ -122,7 +137,7 @@ See docs/COMPATIBILITY.md for the observed validation baseline and docs/ARCHITEC
     npm run check
     npm pack --dry-run
 
-The test suite uses mocked process/listener boundaries and local mock TCP servers. It does not require UEFN, VS Code, an Epic account, or proprietary files. Live acceptance remains a separate Windows test with UEFN open.
+The test suite uses mocked process/listener boundaries, local mock TCP servers, synthetic project metadata, and a synthetic stdio LSP process. It does not require UEFN, VS Code, an Epic account, or proprietary files. Real language-server acceptance remains a separate Windows test; a successful semantic check is not a substitute for the live Workflow compile.
 
 ## License and disclaimer
 

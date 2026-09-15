@@ -13,6 +13,9 @@ This project is a local compiler interoperability client. It does not handle Epi
 - Process IDs are validated as positive integers before they influence selection.
 - Content-Length frames are bounded to prevent unbounded protocol memory use.
 - Normal JSON output excludes raw protocol notifications and redacts sensitive-looking fields in opt-in debug output.
+- `check` starts the locally discovered Epic Verse language-server executable (or an explicitly supplied local `--lsp-path`), communicates over child-process stdio, and reads project/digest metadata without writing it.
+- Machine-shareable `doctor`/`backends --json` output omits executable and project paths unless `--include-paths` is explicitly supplied.
+- Semantic diagnostics are never represented as the existing authoritative `compile` result; the two JSON result types and capability declarations remain separate.
 
 Do not expose the UEFN Workflow Server to a LAN or the Internet. This tool does not add authentication to that local service.
 

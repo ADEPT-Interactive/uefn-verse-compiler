@@ -11,6 +11,40 @@ export type CompilerStatus =
 
 export type DiscoveryStatus = Exclude<CompilerStatus, 'compiled' | 'compile-request-failed'>;
 
+export type SemanticCheckStatus =
+  | 'checked-clean'
+  | 'checked-with-errors'
+  | 'metadata-unavailable'
+  | 'metadata-invalid'
+  | 'language-server-unavailable'
+  | 'project-unrecognized'
+  | 'check-failed';
+
+export type CompilerBackendId = 'workflow' | 'epic-verse-lsp';
+
+export type CapabilityState = 'yes' | 'no' | 'unknown';
+
+export interface CompilerBackendCapabilities {
+  semanticAnalysis: CapabilityState;
+  authoritativeCompilation: CapabilityState;
+  requiresUefnProcess: CapabilityState;
+  requiresUefnGui: CapabilityState;
+  requiresGeneratedProjectMetadata: CapabilityState;
+  supportsIncremental: CapabilityState;
+  returnsDiagnostics: CapabilityState;
+  producesArtifacts: CapabilityState;
+}
+
+export interface CompilerBackendDescriptor {
+  id: CompilerBackendId;
+  name: string;
+  available: boolean;
+  version?: string;
+  executablePath?: string;
+  reason?: string;
+  capabilities: CompilerBackendCapabilities;
+}
+
 export interface WorkflowEndpoint {
   host: string;
   port: number;
@@ -25,12 +59,15 @@ export interface VerseCompilerSession extends WorkflowEndpoint {
 }
 
 export interface VerseCompilerDiagnostic {
-  severity?: 'error' | 'warning' | 'info' | 'log';
+  severity?: 'error' | 'warning' | 'info' | 'hint' | 'log';
   message: string;
   file?: string;
   line?: number;
   column?: number;
+  endLine?: number;
+  endColumn?: number;
   code?: string | number;
+  source?: string;
 }
 
 export interface UefnProcessInfo {
@@ -82,6 +119,92 @@ export interface WorkflowCompileResult {
   diagnostics?: VerseCompilerDiagnostic[];
   session?: VerseCompilerSession;
   error?: string;
+}
+
+export interface VerseProjectPackage {
+  name: string;
+  directory?: string;
+  role?: string;
+  readOnly?: boolean;
+  digestFiles: string[];
+}
+
+export type ProjectMetadataFreshness = 'fresh-by-mtime' | 'possibly-stale' | 'unknown';
+
+export interface VerseProjectMetadata {
+  projectName: string;
+  descriptorPath: string;
+  projectRoot: string;
+  contentPath: string;
+  workspaceFilePath?: string;
+  vprojectPath?: string;
+  generatedRoot?: string;
+  packages: VerseProjectPackage[];
+  sourceFiles: string[];
+  metadataAvailable: boolean;
+  /** A conservative timestamp heuristic; it is not a substitute for a UEFN build. */
+  metadataFreshness?: ProjectMetadataFreshness;
+  error?: string;
+}
+
+export interface SemanticCheckTiming {
+  startupMs?: number;
+  firstDiagnosticMs?: number;
+  totalMs: number;
+}
+
+export interface SemanticCheckResult {
+  status: SemanticCheckStatus;
+  success: boolean;
+  connected: boolean;
+  authoritative: false;
+  semantic: true;
+  projectPath?: string;
+  filesChecked: number;
+  numErrors: number;
+  numWarnings: number;
+  numSourceErrors: number;
+  numSourceWarnings: number;
+  numMetadataErrors: number;
+  numMetadataWarnings: number;
+  diagnostics: VerseCompilerDiagnostic[];
+  sourceDiagnostics: VerseCompilerDiagnostic[];
+  metadataDiagnostics: VerseCompilerDiagnostic[];
+  timing: SemanticCheckTiming;
+  backend?: CompilerBackendDescriptor;
+  metadata?: VerseProjectMetadata;
+  error?: string;
+}
+
+export interface ToolchainInstallation {
+  uefnRoot?: string;
+  uefnExecutable?: string;
+  uefnVersion?: string;
+  uefnBuildId?: string;
+  verseExtensionPath?: string;
+  verseExtensionVersion?: string;
+  verseLanguageServerPath?: string;
+  verseLanguageServerVersion?: string;
+  workflowServerModuleRegistered: boolean;
+  verseCompilerModuleRegistered: boolean;
+  commandletExecutable?: string;
+  dedicatedCommandletExecutableAvailable: boolean;
+}
+
+export interface ToolchainRuntimeState {
+  uefnRunning: boolean;
+  uefnProcessIds: number[];
+  vsCodeRunning: boolean;
+  verseLanguageServerRunning: boolean;
+  activeProjectPath?: string;
+}
+
+export interface ToolchainSnapshot {
+  platform: NodeJS.Platform;
+  installation: ToolchainInstallation;
+  runtime: ToolchainRuntimeState;
+  metadata?: VerseProjectMetadata;
+  backends: CompilerBackendDescriptor[];
 }
 
 export interface VerseCompilerStatusResult {
