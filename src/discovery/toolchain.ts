@@ -68,7 +68,9 @@ const lspCapabilities: CompilerBackendCapabilities = {
   requiresUefnProcess: 'no',
   requiresUefnGui: 'no',
   requiresGeneratedProjectMetadata: 'yes',
-  supportsIncremental: 'yes',
+  // The protocol accepts didChange, but the installed server did not produce a
+  // verified same-file warm publication in the persistent measurement.
+  supportsIncremental: 'unknown',
   returnsDiagnostics: 'yes',
   producesArtifacts: 'no',
 };

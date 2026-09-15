@@ -7,7 +7,7 @@ import path from 'node:path';
 import { PassThrough, Writable } from 'node:stream';
 import test from 'node:test';
 import { pathToFileURL } from 'node:url';
-import { compileVerseProject, describeBackends, discoverToolchain, discoverVerseProjectMetadata, fileUriToPath, normalizeLspDiagnostics, resolveWorkflowEndpoint, runVerseLspCheck, workspaceFoldersForProject } from '../src/index.ts';
+import { compileVerseProject, describeBackends, discoverToolchain, discoverVerseProjectMetadata, fileUriToPath, normalizeLspDiagnostics, resolveWorkflowEndpoint, runVerseLspCheck, workspaceFolderEntriesForProject, workspaceFoldersForProject } from '../src/index.ts';
 import { parseCliArgs, exitCodeForStatus } from '../src/cli.ts';
 import { discoverVerseCompiler } from '../src/discovery/discover.ts';
 import { parseNetstatListeners, extractActiveProjectFile, extractProjectFile } from '../src/discovery/windows.ts';
@@ -72,10 +72,10 @@ function fixtureProject(): { root: string; descriptor: string; generatedRoot: st
   const lsp = path.join(root, 'verse-lsp.exe');
   fs.writeFileSync(descriptor, JSON.stringify({ title: 'Fixture' }));
   fs.writeFileSync(path.join(root, 'Fixture.code-workspace'), JSON.stringify({ folders: [
-    { path: content },
-    { path: assetsDigestDirectory },
-    { path: path.join(generatedRoot, 'vproject') },
-    { path: path.join(generatedRoot, 'BuiltIn') },
+    { name: 'Fixture source', path: content },
+    { name: 'Fixture assets', path: assetsDigestDirectory },
+    { name: 'Fixture vproject', path: path.join(generatedRoot, 'vproject') },
+    { name: 'Fixture built-ins', path: path.join(generatedRoot, 'BuiltIn') },
   ] }));
   fs.writeFileSync(source, 'module Fixture\n');
   fs.writeFileSync(lsp, 'synthetic test executable placeholder');
@@ -96,6 +96,8 @@ class FakeLspProcess extends EventEmitter {
   killed = false;
   private readonly decoder = new ContentLengthDecoder();
   private lastUri: string | undefined;
+  initializeParams?: Record<string, unknown>;
+  readonly requests: string[] = [];
 
   constructor(private readonly publishError: boolean, private readonly respondToInitialize = true) {
     super();
@@ -122,14 +124,20 @@ class FakeLspProcess extends EventEmitter {
   }
 
   private handle(request: Record<string, unknown>): void {
+    if (typeof request.method === 'string') this.requests.push(request.method);
     if (request.method === 'initialize') {
       if (!this.respondToInitialize) return;
+      this.initializeParams = request.params as Record<string, unknown>;
       this.send({ jsonrpc: '2.0', id: request.id, result: { capabilities: { textDocumentSync: 2 } } });
       this.send({ jsonrpc: '2.0', id: 'register-1', method: 'client/registerCapability', params: { registrations: [] } });
       return;
     }
     if (request.method === 'shutdown') {
       this.send({ jsonrpc: '2.0', id: request.id, result: null });
+      return;
+    }
+    if (request.method === 'exit') {
+      this.emit('exit', 0, null);
       return;
     }
     if (request.method === 'workspace/diagnostic') {
@@ -172,7 +180,7 @@ const syntheticCapabilities: CompilerBackendCapabilities = {
   requiresUefnProcess: 'no',
   requiresUefnGui: 'no',
   requiresGeneratedProjectMetadata: 'yes',
-  supportsIncremental: 'yes',
+  supportsIncremental: 'unknown',
   returnsDiagnostics: 'yes',
   producesArtifacts: 'no',
 };
@@ -316,11 +324,13 @@ test('historical port 1962 remains a tested compatibility endpoint when availabl
 
 test('CLI argument and exit-code contracts are deterministic', () => {
   assert.deepEqual(parseCliArgs(['compile', '--project', 'D:/Project.uefnproject', '--process-id', '42', '--json']), {
-    command: 'compile', projectPath: 'D:/Project.uefnproject', preferredProcessId: 42, timeoutMs: undefined, lspPath: undefined, includePaths: false, json: true, debug: false,
+    command: 'compile', projectPath: 'D:/Project.uefnproject', preferredProcessId: 42, timeoutMs: undefined, lspPath: undefined, diagnosticMode: undefined, includePaths: false, json: true, debug: false,
   });
   assert.deepEqual(parseCliArgs(['check', '--project', 'D:/Project.uefnproject', '--lsp-path', 'D:/verse-lsp.exe', '--include-paths']), {
-    command: 'check', projectPath: 'D:/Project.uefnproject', preferredProcessId: undefined, timeoutMs: undefined, lspPath: 'D:/verse-lsp.exe', includePaths: true, json: false, debug: false,
+    command: 'check', projectPath: 'D:/Project.uefnproject', preferredProcessId: undefined, timeoutMs: undefined, lspPath: 'D:/verse-lsp.exe', diagnosticMode: undefined, includePaths: true, json: false, debug: false,
   });
+  assert.equal(parseCliArgs(['check', '--project', 'D:/Project.uefnproject', '--diagnostic-mode', 'workspace']).diagnosticMode, 'workspace');
+  assert.throws(() => parseCliArgs(['compile', '--diagnostic-mode', 'push']), /only valid with check/);
   assert.throws(() => parseCliArgs(['compile', '--process-id', '0']), /positive integer/);
   assert.throws(() => parseCliArgs(['check', '--project']), /requires a value/);
   assert.equal(exitCodeForStatus('compiled', true), 0);
@@ -364,6 +374,12 @@ test('discovers synthetic project metadata, digests, and timestamp freshness', t
   assert.equal(fixture.metadata.packages[1]?.digestFiles.length, 1);
   assert.equal(fixture.metadata.metadataFreshness, 'fresh-by-mtime');
   assert.equal(workspaceFoldersForProject(fixture.metadata).length, 4);
+  assert.deepEqual(workspaceFolderEntriesForProject(fixture.metadata).map(entry => entry.name), [
+    'Fixture source',
+    'Fixture assets',
+    'Fixture vproject',
+    'Fixture built-ins',
+  ]);
 });
 
 test('reports explicit backend capabilities without inventing a headless compiler', () => {
@@ -422,7 +438,55 @@ test('runs a synthetic stdio LSP through initialization, registration, didChange
   assert.equal(result.sourceDiagnostics[0]?.line, 3);
   assert.equal(result.sourceDiagnostics[0]?.column, 2);
   assert.equal(result.sourceDiagnostics[0]?.endColumn, 9);
+  assert.equal(result.shutdownClean, true);
   assert.equal(child.killed, false);
+  assert.deepEqual(child.initializeParams?.workspaceFolders, [
+    { uri: pathToFileURL(fixture.content).href, name: 'Fixture source' },
+    { uri: pathToFileURL(path.join(fixture.generatedRoot, 'Assets')).href, name: 'Fixture assets' },
+    { uri: pathToFileURL(path.join(fixture.generatedRoot, 'vproject')).href, name: 'Fixture vproject' },
+    { uri: pathToFileURL(path.join(fixture.generatedRoot, 'BuiltIn')).href, name: 'Fixture built-ins' },
+  ]);
+  assert.equal(child.initializeParams?.rootPath, fixture.content);
+  assert.equal(child.initializeParams?.rootUri, pathToFileURL(fixture.content).href);
+  assert.equal(child.requests.includes('workspace/diagnostic'), false);
+  assert.equal(result.timing.initializeMs !== undefined, true);
+  assert.equal(result.timing.startupMs !== undefined, true);
+  assert.equal(result.timing.analysisSettledMs !== undefined, true);
+  assert.equal(result.timing.shutdownMs !== undefined, true);
+});
+
+test('supports explicit workspace diagnostics without making them the default push contract', async t => {
+  const fixture = fixtureProject();
+  t.after(() => fs.rmSync(fixture.root, { recursive: true, force: true }));
+  const child = new FakeLspProcess(true);
+  const result = await runVerseLspCheck(fixture.metadata, fixture.lsp, {
+    diagnosticMode: 'workspace',
+    settleMs: 10,
+    timeoutMs: 2000,
+    spawnProcess: () => child as unknown as ChildProcessWithoutNullStreams,
+  });
+  assert.equal(result.protocol.workspaceDiagnosticRequested, true);
+  assert.equal(result.protocol.workspaceDiagnosticCompleted, true);
+  assert.equal(result.timing.workspaceDiagnosticMs !== undefined, true);
+  assert.equal(child.requests.includes('workspace/diagnostic'), true);
+  assert.equal(result.shutdownClean, true);
+});
+
+test('reports unsupported pull diagnostics while preserving clean shutdown', async t => {
+  const fixture = fixtureProject();
+  t.after(() => fs.rmSync(fixture.root, { recursive: true, force: true }));
+  const child = new FakeLspProcess(false);
+  const result = await runVerseLspCheck(fixture.metadata, fixture.lsp, {
+    diagnosticMode: 'pull',
+    settleMs: 10,
+    timeoutMs: 2000,
+    spawnProcess: () => child as unknown as ChildProcessWithoutNullStreams,
+  });
+  assert.equal(result.protocol.textDocumentDiagnosticAdvertised, false);
+  assert.match(result.error ?? '', /did not advertise/i);
+  assert.equal(result.shutdownClean, true);
+  assert.equal(child.killed, false);
+  assert.equal(child.requests.includes('textDocument/diagnostic'), false);
 });
 
 test('returns a bounded failure when the LSP never initializes', async t => {

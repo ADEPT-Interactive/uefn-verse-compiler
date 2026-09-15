@@ -26,6 +26,8 @@ function emptyResult(status: SemanticCheckStatus, metadata: VerseProjectMetadata
     numSourceWarnings: 0,
     numMetadataErrors: 0,
     numMetadataWarnings: 0,
+    metadataHealth: 'unverified',
+    diagnosticMode: 'push',
     diagnostics: [],
     sourceDiagnostics: [],
     metadataDiagnostics: [],
@@ -69,6 +71,8 @@ export async function checkVerseProject(options: CheckVerseOptions): Promise<Sem
       numSourceWarnings: 0,
       numMetadataErrors: 0,
       numMetadataWarnings: 0,
+      metadataHealth: 'unverified',
+      diagnosticMode: 'push',
       diagnostics: [],
       sourceDiagnostics: [],
       metadataDiagnostics: [],
@@ -88,11 +92,15 @@ export async function checkVerseProject(options: CheckVerseOptions): Promise<Sem
   const numSourceWarnings = run.sourceDiagnostics.filter(diagnostic => diagnostic.severity === 'warning').length;
   const numMetadataErrors = run.metadataDiagnostics.filter(diagnostic => diagnostic.severity === 'error').length;
   const numMetadataWarnings = run.metadataDiagnostics.filter(diagnostic => diagnostic.severity === 'warning').length;
+  const metadataWasExplicitlyAudited = run.diagnosticMode === 'workspace' || run.diagnosticMode === 'both';
   const status: SemanticCheckStatus = run.error
     ? (run.connected ? 'check-failed' : 'language-server-unavailable')
     : numSourceErrors > 0 ? 'checked-with-errors'
-      : numMetadataErrors > 0 ? 'metadata-invalid'
+      : metadataWasExplicitlyAudited && numMetadataErrors > 0 ? 'metadata-invalid'
         : 'checked-clean';
+  const metadataHealth = run.diagnosticMode === 'push' || run.diagnosticMode === 'pull'
+    ? 'unverified' as const
+    : numMetadataErrors > 0 ? 'invalid' as const : 'clean' as const;
   return {
     status,
     success: status === 'checked-clean',
@@ -107,6 +115,8 @@ export async function checkVerseProject(options: CheckVerseOptions): Promise<Sem
     numSourceWarnings,
     numMetadataErrors,
     numMetadataWarnings,
+    metadataHealth,
+    diagnosticMode: run.diagnosticMode,
     diagnostics: run.diagnostics,
     sourceDiagnostics: run.sourceDiagnostics,
     metadataDiagnostics: run.metadataDiagnostics,

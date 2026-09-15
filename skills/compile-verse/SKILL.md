@@ -28,6 +28,7 @@ From a repository checkout, use:
     npm run verse-compile -- status --project "C:\Path\Project.uefnproject"
     npm run verse-compile -- compile --project "C:\Path\Project.uefnproject" --json
     npm run verse-compile -- check --project "C:\Path\Project.uefnproject" --json
+    npm run verse-compile -- check --project "C:\Path\Project.uefnproject" --diagnostic-mode workspace --json
 
 From an installed package, use:
 
@@ -53,7 +54,7 @@ Do not claim success from a TCP connection, a candidate session, a static check,
 - Exit code 3 means multiple UEFN sessions remain ambiguous. Supply the requested project path or an authoritative --process-id.
 - Exit code 5 means protocol, timeout, stale-session, or client failure. Retry once after UEFN has settled; if it persists, report the structured error rather than substituting static analysis.
 
-For `check`, exit code 1 means source semantic errors. Exit code 2 means an unrecognized project, unavailable language server, unavailable metadata, or generated metadata diagnostics. Exit code 5 means a language-server client/protocol failure. Do not translate a `check` result into `compiled`.
+For `check`, exit code 1 means source semantic errors. Exit code 2 means an unrecognized project, unavailable language server, unavailable metadata, or an explicit workspace audit classified generated metadata as invalid. Default push-mode metadata diagnostics are retained separately with `metadataHealth: unverified` and do not by themselves change a source-clean check to exit code 2. Exit code 5 means a language-server client/protocol failure. Do not translate a `check` result into `compiled`.
 
 The client automatically re-discovers after a stale discovered connection. A historical port fallback exists only for compatibility when the selected process exposes no enumerated listener. Do not tell users to configure that port as a normal requirement.
 

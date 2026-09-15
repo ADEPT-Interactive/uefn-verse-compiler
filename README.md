@@ -10,6 +10,7 @@ This project is not affiliated with, endorsed by, or sponsored by Epic Games. Fo
 - Matches a requested project or explicit UEFN process when multiple editor instances are open.
 - Compiles through the real local UEFN Workflow Server.
 - Performs a separate semantic `check` through the installed Epic Verse language server when generated project metadata is available.
+- Defaults to LSP push diagnostics and keeps generated-metadata diagnostics separate from source results; explicit workspace/pull modes are available for interoperability experiments.
 - Reports installed toolchain components and backend capabilities through `doctor` and `backends`.
 - Retains protocol notifications and normalizes diagnostics when locations are provided.
 - Fails closed on ambiguous sessions and rejects non-loopback endpoint overrides.
@@ -35,6 +36,7 @@ From a clone of this repository:
     npm run verse-compile -- compile --project "C:\Path\Project.uefnproject"
     npm run verse-compile -- compile --project "C:\Path\Project.uefnproject" --json
     npm run verse-compile -- check --project "C:\Path\Project.uefnproject" --json
+    npm run verse-compile -- check --project "C:\Path\Project.uefnproject" --diagnostic-mode workspace --json
     npm run verse-compile -- doctor --project "C:\Path\Project.uefnproject"
     npm run verse-compile -- backends --json
 
@@ -49,13 +51,13 @@ Normal usage does not require a host or port. For deterministic local tests only
     uefn-verse-compiler discover [--project <path>] [--process-id <pid>] [--json]
     uefn-verse-compiler status   [--project <path>] [--process-id <pid>] [--json]
     uefn-verse-compiler compile  [--project <path>] [--process-id <pid>] [--timeout-ms <ms>] [--json] [--debug]
-    uefn-verse-compiler check    --project <path> [--timeout-ms <ms>] [--lsp-path <path>] [--json]
+    uefn-verse-compiler check    --project <path> [--timeout-ms <ms>] [--lsp-path <path>] [--diagnostic-mode <push|workspace|pull|both>] [--json]
     uefn-verse-compiler doctor   [--project <path>] [--lsp-path <path>] [--include-paths] [--json]
     uefn-verse-compiler backends [--project <path>] [--lsp-path <path>] [--include-paths] [--json]
 
 discover reports candidate sessions. status reports whether discovery found a candidate, but does not claim that compilation succeeded. compile sends the live compileProject request and uses the final numeric numErrors field as its success authority.
 
-check reports semantic diagnostics and always marks its JSON result with `resultType: "semantic-check"`, `semantic: true`, and `authoritative: false`. A clean semantic check is not an authoritative UEFN build. doctor inspects local installation/runtime/project state; backends reports only capabilities supported by the current evidence. Neither command launches or modifies UEFN.
+check reports semantic diagnostics and always marks its JSON result with `resultType: "semantic-check"`, `semantic: true`, and `authoritative: false`. The default `push` mode follows Epic's installed extension: source diagnostics are usable even when generated-file diagnostics are present, and `metadataHealth` is `unverified`. `--diagnostic-mode workspace` or `both` explicitly audits the generated workspace and can return `metadata-invalid`; `pull` is an experiment and is reported unsupported when the installed server does not advertise it. A clean semantic check is not an authoritative UEFN build. doctor inspects local installation/runtime/project state; backends reports only capabilities supported by the current evidence. Neither command launches or modifies UEFN.
 
 Exit codes are deterministic:
 
@@ -68,7 +70,7 @@ Exit codes are deterministic:
 | 4 | Invalid CLI arguments |
 | 5 | Client, protocol, timeout, or other internal compiler request failure |
 
-For `check`, code 1 means source semantic errors, code 2 means missing/unusable project metadata or language-server state (including generated metadata diagnostics), and code 5 means a client or protocol failure. `doctor` and `backends` return code 0 after producing their report, even when a backend is unavailable.
+For `check`, code 1 means source semantic errors, code 2 means missing/unusable project metadata or an explicit workspace audit classified generated metadata as invalid, and code 5 means a client or protocol failure. Default push-mode metadata diagnostics are retained in JSON but do not by themselves change a source-clean check to code 2. `doctor` and `backends` return code 0 after producing their report, even when a backend is unavailable.
 
 ## JSON output
 
@@ -120,6 +122,14 @@ The protocol uses raw local TCP with Content-Length-framed JSON. The client does
 ## Agent integration
 
 The self-contained agent instructions are in skills/compile-verse/SKILL.md. They describe when to use semantic `check` for fast feedback, when live `compile` is required, how to handle unavailable or ambiguous sessions, and why semantic analysis cannot be treated as equivalent.
+
+For Windows interoperability evidence, `npm run accept:lsp -- --project "C:\Path\Project.uefnproject" --mode gate-a` runs the non-mutating Gate A corpus while UEFN and VS Code are absent. The disposable parity runner is deliberately separate and requires an explicitly acknowledged disposable project plus an independently identified active Workflow project:
+
+    npm run parity:verse -- --project "C:\Path\Disposable\Test.uefnproject" --process-id <PID> --confirm-disposable --json
+
+It refuses to mutate source at the project switcher or when project identity is not confirmed, hashes the original bytes, restores them after every case and in `finally`, and fails closed if restoration verification fails.
+
+For investigation-only persistent behavior, `npm run measure:lsp -- --project "C:\Path\Project.uefnproject" --settle-ms 1200 --timeout-ms 5000 --json` probes same-file and cross-file push updates without writing the project. The installed server did not produce the expected same-file warm publications in the observed run, so no persistent/watch mode is exposed as a supported compiler path.
 
 ## Security
 

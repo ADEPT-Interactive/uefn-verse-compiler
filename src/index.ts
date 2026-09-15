@@ -8,7 +8,7 @@ export {
   validateWorkflowEndpoint,
 } from './discovery/endpoint.js';
 export { discoverVerseCompiler } from './discovery/discover.js';
-export { discoverVerseProjectMetadata, workspaceFoldersForProject } from './discovery/project.js';
+export { discoverVerseProjectMetadata, workspaceFolderEntriesForProject, workspaceFoldersForProject } from './discovery/project.js';
 export { describeBackends, discoverToolchain } from './discovery/toolchain.js';
 export { projectPathsMatch } from './discovery/paths.js';
 export { compileVerseProject, getVerseCompilerStatus } from './compiler/client.js';
@@ -26,10 +26,12 @@ export type {
   CompilerStatus,
   CompileVerseOptions,
   DiscoveryStatus,
+  LspDiagnosticMode,
   ProjectMetadataFreshness,
   LoopbackListener,
   SemanticCheckResult,
   SemanticCheckStatus,
+  SemanticMetadataHealth,
   SemanticCheckTiming,
   ToolchainInstallation,
   ToolchainRuntimeState,
@@ -43,7 +45,7 @@ export type {
   WorkflowCompileResult,
   WorkflowEndpoint,
 } from './types.js';
-export type { ProjectDiscoveryOptions } from './discovery/project.js';
+export type { ProjectDiscoveryOptions, ProjectWorkspaceFolder } from './discovery/project.js';
 export type { ToolchainDiscoveryOptions, ToolchainDiscoverySystem, ToolchainProcessInfo } from './discovery/toolchain.js';
 export type { CheckVerseOptions } from './compiler/check.js';
-export type { LspCheckOptions, LspCheckRun } from './compiler/lsp.js';
+export type { LspCheckOptions, LspCheckRun, LspProtocolObservation, LspWorkspaceFolder } from './compiler/lsp.js';

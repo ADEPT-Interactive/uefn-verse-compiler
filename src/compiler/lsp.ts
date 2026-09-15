@@ -1,15 +1,17 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import fs from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import path from 'node:path';
 import { performance } from 'node:perf_hooks';
-import { workspaceFoldersForProject } from '../discovery/project.js';
+import { workspaceFolderEntriesForProject, type ProjectWorkspaceFolder } from '../discovery/project.js';
 import { ContentLengthDecoder, encodeContentLengthJson } from '../protocol/framing.js';
-import type { SemanticCheckTiming, VerseCompilerDiagnostic, VerseProjectMetadata } from '../types.js';
+import type { LspDiagnosticMode, SemanticCheckTiming, VerseCompilerDiagnostic, VerseProjectMetadata } from '../types.js';
 
 const DEFAULT_TIMEOUT_MS = 120000;
 const DIAGNOSTIC_SETTLE_MS = 1200;
 const DIAGNOSTIC_QUIET_MS = 10000;
+const SHUTDOWN_TIMEOUT_MS = 1000;
 
 interface LspPosition {
   line?: unknown;
@@ -40,6 +42,28 @@ interface LspMessage {
 
 type LspId = number | string;
 
+export interface LspWorkspaceFolder {
+  uri: string;
+  name: string;
+}
+
+export interface LspProtocolObservation {
+  clientMethods: string[];
+  serverMethods: string[];
+  serverRequests: string[];
+  configurationSections: Array<string | null>;
+  registrations: string[];
+  serverCapabilities?: Record<string, unknown>;
+  workspaceDiagnosticAdvertised: boolean;
+  textDocumentDiagnosticAdvertised: boolean;
+  workspaceDiagnosticRequested: boolean;
+  workspaceDiagnosticCompleted: boolean;
+  workspaceDiagnosticError?: string;
+  pullDiagnosticRequested: boolean;
+  pullDiagnosticCompleted: number;
+  pullDiagnosticError?: string;
+}
+
 export interface LspCheckRun {
   diagnostics: VerseCompilerDiagnostic[];
   sourceDiagnostics: VerseCompilerDiagnostic[];
@@ -47,26 +71,55 @@ export interface LspCheckRun {
   filesChecked: number;
   timing: SemanticCheckTiming;
   connected: boolean;
+  diagnosticMode: LspDiagnosticMode;
+  protocol: LspProtocolObservation;
+  childProcessId?: number;
+  spawnedExecutablePath?: string;
+  shutdownClean: boolean;
   error?: string;
 }
 
 export interface LspCheckOptions {
   timeoutMs?: number;
   settleMs?: number;
-  /** Fallback quiet period when the server does not implement workspace/diagnostic. */
+  /** Bounded fallback when the server does not publish all expected diagnostics. */
   quietMs?: number;
+  /** Diagnostic transport to use. The default is push diagnostics only. */
+  diagnosticMode?: LspDiagnosticMode;
   /** Optional in-memory full-text replacements keyed by native source path; disk files are never changed. */
   sourceTexts?: Readonly<Record<string, string>>;
-  spawnProcess?: (executablePath: string, options: { cwd: string }) => ChildProcessWithoutNullStreams;
+  /** Override the official extension's first workspace folder root path. */
+  rootPath?: string | null;
+  /** Override the official extension's first workspace folder root URI. */
+  rootUri?: string | null;
+  /** Override generated workspace folders, including their user-visible names. */
+  workspaceFolders?: readonly LspWorkspaceFolder[];
+  /** Value sent as LSP initialize.initializationOptions. */
+  initializationOptions?: unknown;
+  /** Deep-merged with the official-extension-shaped default client capabilities. */
+  clientCapabilities?: Record<string, unknown>;
+  /** Configuration values returned to workspace/configuration requests. */
+  configuration?: Readonly<Record<string, unknown>> | ((item: Record<string, unknown>) => unknown);
+  /** Whether to send a full-text didChange after didOpen; enabled for dirty in-memory probes. */
+  sendDidChange?: boolean;
+  /** Match Epic's extension by copying the bundled executable to a temporary path before spawn. */
+  copyExecutableToTemp?: boolean;
+  /** Arguments configured by verse.serverArguments. */
+  serverArguments?: readonly string[];
+  environment?: NodeJS.ProcessEnv;
+  shutdownTimeoutMs?: number;
+  /** Observe the child while it is still alive; used by the acceptance harness for process evidence. */
+  onSpawn?: (details: { pid: number; executablePath: string; cwd: string }) => void;
+  spawnProcess?: (executablePath: string, options: { cwd: string; args?: readonly string[]; env?: NodeJS.ProcessEnv }) => ChildProcessWithoutNullStreams;
   now?: () => number;
 }
 
-function defaultSpawn(executablePath: string, options: { cwd: string }): ChildProcessWithoutNullStreams {
-  return spawn(executablePath, [], {
+function defaultSpawn(executablePath: string, options: { cwd: string; args?: readonly string[]; env?: NodeJS.ProcessEnv }): ChildProcessWithoutNullStreams {
+  return spawn(executablePath, [...(options.args ?? [])], {
     cwd: options.cwd,
     stdio: ['pipe', 'pipe', 'pipe'],
     windowsHide: true,
-    env: { ...process.env },
+    env: options.env ?? { ...process.env },
   });
 }
 
@@ -178,10 +231,130 @@ function workspaceDiagnosticEntries(value: unknown): Array<{ uri: string; values
   return entries;
 }
 
+function pullDiagnosticEntries(value: unknown): Array<{ uri?: string; values: unknown[] }> {
+  if (Array.isArray(value)) return [{ values: value }];
+  if (!value || typeof value !== 'object') return [];
+  const record = value as { items?: unknown; uri?: unknown; diagnostics?: unknown };
+  if (Array.isArray(record.items)) return [{ uri: typeof record.uri === 'string' ? record.uri : undefined, values: record.items }];
+  if (Array.isArray(record.diagnostics)) return [{ uri: typeof record.uri === 'string' ? record.uri : undefined, values: record.diagnostics }];
+  return [];
+}
+
 function responseError(value: unknown): string {
   if (!value || typeof value !== 'object') return 'Verse language server returned an error.';
   const record = value as Record<string, unknown>;
   return typeof record.message === 'string' ? record.message : 'Verse language server returned an error.';
+}
+
+function cloneRecord(value: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(value).map(([key, child]) => [
+    key,
+    child && typeof child === 'object' && !Array.isArray(child) ? cloneRecord(child as Record<string, unknown>) : child,
+  ]));
+}
+
+function mergeRecords(base: Record<string, unknown>, override: Record<string, unknown>): Record<string, unknown> {
+  const result = cloneRecord(base);
+  for (const [key, value] of Object.entries(override)) {
+    if (value && typeof value === 'object' && !Array.isArray(value) && result[key] && typeof result[key] === 'object' && !Array.isArray(result[key])) {
+      result[key] = mergeRecords(result[key] as Record<string, unknown>, value as Record<string, unknown>);
+    } else {
+      result[key] = value;
+    }
+  }
+  return result;
+}
+
+/** The capabilities emitted by the installed vscode-languageclient 5.x built-in features used by Epic's extension. */
+export function officialClientCapabilities(): Record<string, unknown> {
+  return {
+    workspace: {
+      applyEdit: true,
+      workspaceEdit: {
+        documentChanges: true,
+        resourceOperations: ['create', 'rename', 'delete'],
+        failureHandling: 'textOnlyTransactional',
+      },
+      configuration: true,
+      workspaceFolders: true,
+      didChangeConfiguration: { dynamicRegistration: true },
+      didChangeWatchedFiles: { dynamicRegistration: true },
+    },
+    textDocument: {
+      publishDiagnostics: { relatedInformation: true },
+      synchronization: { dynamicRegistration: true, willSave: true, willSaveWaitUntil: true, didSave: true },
+      completion: {
+        dynamicRegistration: true,
+        completionItem: {
+          snippetSupport: true,
+          commitCharactersSupport: true,
+          documentationFormat: ['markdown', 'plaintext'],
+          deprecatedSupport: true,
+          preselectSupport: true,
+        },
+        contextSupport: true,
+      },
+      hover: { dynamicRegistration: true, contentFormat: ['markdown', 'plaintext'] },
+      signatureHelp: { dynamicRegistration: true, signatureInformation: { documentationFormat: ['markdown', 'plaintext'] } },
+      definition: { dynamicRegistration: true, linkSupport: true },
+      references: { dynamicRegistration: true },
+      documentHighlight: { dynamicRegistration: true },
+      documentSymbol: { dynamicRegistration: true, hierarchicalDocumentSymbolSupport: true },
+      codeAction: { dynamicRegistration: true, codeActionLiteralSupport: { codeActionKind: { valueSet: [] } }, dataSupport: true },
+      codeLens: { dynamicRegistration: true },
+      formatting: { dynamicRegistration: true },
+      rangeFormatting: { dynamicRegistration: true },
+      onTypeFormatting: { dynamicRegistration: true },
+      rename: { dynamicRegistration: true, prepareSupport: true },
+      documentLink: { dynamicRegistration: true, tooltipSupport: true },
+    },
+    window: {
+      workDoneProgress: true,
+      showMessage: { messageActionItem: { additionalPropertiesSupport: true } },
+      showDocument: { support: true },
+    },
+    general: {
+      regularExpressions: { engine: 'ECMAScript', version: 'ES2020' },
+      markdown: { parser: 'marked', version: '1.1.0' },
+    },
+  };
+}
+
+function defaultConfiguration(item: Record<string, unknown>): unknown {
+  const section = typeof item.section === 'string' ? item.section : undefined;
+  const verse = { serverPath: '', serverArguments: [], syncFileEvents: true, trace: '', useRelease: false };
+  if (!section) return { verse };
+  if (section === 'verse') return verse;
+  if (section === 'verse.serverPath') return verse.serverPath;
+  if (section === 'verse.serverArguments') return verse.serverArguments;
+  if (section === 'verse.syncFileEvents') return verse.syncFileEvents;
+  if (section === 'verse.trace') return verse.trace;
+  if (section === 'verse.useRelease') return verse.useRelease;
+  return null;
+}
+
+function configurationFor(options: LspCheckOptions, item: Record<string, unknown>): unknown {
+  if (typeof options.configuration === 'function') return options.configuration(item);
+  if (options.configuration) {
+    const section = typeof item.section === 'string' ? item.section : undefined;
+    if (section && Object.prototype.hasOwnProperty.call(options.configuration, section)) return options.configuration[section];
+  }
+  return defaultConfiguration(item);
+}
+
+function copiedExecutable(executablePath: string): string {
+  const extension = path.extname(executablePath);
+  const base = path.basename(executablePath, extension);
+  const preferred = path.join(process.env.TEMP ?? process.env.TMP ?? '.', `${base}-${process.pid}${extension}`);
+  let candidate = preferred;
+  let suffix = 1;
+  while (fs.existsSync(candidate)) candidate = path.join(path.dirname(preferred), `${base}-${process.pid}-${suffix++}${extension}`);
+  fs.copyFileSync(executablePath, candidate);
+  return candidate;
+}
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value));
 }
 
 /** Run the installed Epic Verse language server over project source without writing to the project. */
@@ -190,60 +363,89 @@ export async function runVerseLspCheck(
   executablePath: string,
   options: LspCheckOptions = {},
 ): Promise<LspCheckRun> {
-  const startedAt = (options.now ?? (() => performance.now()))();
+  const now = options.now ?? (() => performance.now());
+  const startedAt = now();
   const timeoutMs = Math.max(1000, options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
   const settleMs = Math.max(100, options.settleMs ?? DIAGNOSTIC_SETTLE_MS);
-  const sourceFiles = metadata.sourceFiles;
-  if (sourceFiles.length === 0) {
+  const diagnosticMode = options.diagnosticMode ?? 'push';
+  const timing: SemanticCheckTiming = { totalMs: 0 };
+  const protocol: LspProtocolObservation = {
+    clientMethods: [],
+    serverMethods: [],
+    serverRequests: [],
+    configurationSections: [],
+    registrations: [],
+    workspaceDiagnosticAdvertised: false,
+    textDocumentDiagnosticAdvertised: false,
+    workspaceDiagnosticRequested: false,
+    workspaceDiagnosticCompleted: false,
+    pullDiagnosticRequested: false,
+    pullDiagnosticCompleted: 0,
+  };
+  if (metadata.sourceFiles.length === 0) {
+    timing.totalMs = Math.round(now() - startedAt);
     return {
       diagnostics: [],
       sourceDiagnostics: [],
       metadataDiagnostics: [],
       filesChecked: 0,
-      timing: { totalMs: Math.round((options.now ?? (() => performance.now()))() - startedAt) },
+      timing,
       connected: false,
+      diagnosticMode,
+      protocol,
+      shutdownClean: false,
     };
   }
 
-  let child: ChildProcessWithoutNullStreams;
-  try {
-    child = (options.spawnProcess ?? defaultSpawn)(executablePath, { cwd: metadata.contentPath });
-  } catch (error) {
-    return {
-      diagnostics: [],
-      sourceDiagnostics: [],
-      metadataDiagnostics: [],
-      filesChecked: 0,
-      timing: { totalMs: Math.round((options.now ?? (() => performance.now()))() - startedAt) },
-      connected: false,
-      error: error instanceof Error ? `Could not start Verse language server: ${error.message}` : 'Could not start Verse language server.',
-    };
-  }
-
-  const now = options.now ?? (() => performance.now());
+  const entries = options.workspaceFolders ?? workspaceFolderEntriesForProject(metadata).map((entry: ProjectWorkspaceFolder) => ({
+    uri: workspaceUri(entry.path),
+    name: entry.name,
+  }));
+  const workspaceFolders = [...new Map(entries.map(entry => [entry.uri, entry])).values()];
+  const firstWorkspacePath = workspaceFolders[0] ? fileUriToPath(workspaceFolders[0].uri) : undefined;
+  const rootPath = options.rootPath === undefined ? firstWorkspacePath ?? metadata.contentPath : options.rootPath;
+  const rootUri = options.rootUri === undefined ? workspaceFolders[0]?.uri ?? null : options.rootUri;
   const sourceOverrides = new Map(Object.entries(options.sourceTexts ?? {}).map(([filePath, text]) => [normalizePath(filePath), text]));
-  const workspacePaths = workspaceFoldersForProject(metadata);
-  const workspaceFolders = [...new Set(workspacePaths)].map(folderPath => ({ uri: workspaceUri(folderPath), name: path.basename(folderPath) }));
-  const sourceUris = new Set(sourceFiles.map(filePath => normalizePath(filePath)));
+  const sourceUris = new Set(metadata.sourceFiles.map(filePath => normalizePath(filePath)));
   const diagnosticsByUri = new Map<string, VerseCompilerDiagnostic[]>();
   const decoder = new ContentLengthDecoder();
   const pending = new Map<LspId, { resolve: (value: unknown) => void; reject: (error: Error) => void }>();
+  const expectedSourceUris = [...sourceUris];
+  const publishedUris = new Set<string>();
   let nextId = 1;
+  let child: ChildProcessWithoutNullStreams;
+  let childExited = false;
   let connected = false;
   let initialized = false;
   let shutdownSent = false;
-  let workspaceReportReceived = false;
+  let shutdownResponseReceived = false;
+  let shutdownClean = false;
   let finished = false;
-  let firstDiagnosticMs: number | undefined;
+  let workspaceReportReceived = diagnosticMode !== 'workspace' && diagnosticMode !== 'both';
+  let pullExpected = 0;
+  let pullCompleted = 0;
+  let pullCapabilityResolved = diagnosticMode !== 'pull';
   let settleTimer: ReturnType<typeof setTimeout> | undefined;
   let quietTimer: ReturnType<typeof setTimeout> | undefined;
   let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
   let killTimer: ReturnType<typeof setTimeout> | undefined;
   let resolveRun: (value: LspCheckRun) => void = () => undefined;
+  let temporaryExecutablePath: string | undefined;
+  let spawnedExecutablePath: string | undefined;
+  let initializeStartedAt: number | undefined;
+  let workspaceStartedAt: number | undefined;
+  let shutdownStartedAt: number | undefined;
+  let analysisSettled = false;
+  let resolveError: string | undefined;
 
   const resultPromise = new Promise<LspCheckRun>(resolve => { resolveRun = resolve; });
 
+  const recordClientMethod = (message: Record<string, unknown>): void => {
+    if (typeof message.method === 'string') protocol.clientMethods.push(message.method);
+  };
+
   const send = (message: Record<string, unknown>): void => {
+    recordClientMethod(message);
     if (child.stdin.destroyed) return;
     child.stdin.write(encodeContentLengthJson(message));
   };
@@ -256,25 +458,36 @@ export async function runVerseLspCheck(
   };
 
   const stopProcess = (): void => {
-    if (!child.killed) child.kill();
+    if (!child.killed && !childExited) child.kill();
     if (killTimer) clearTimeout(killTimer);
   };
 
+  const cleanupTemporaryExecutable = (): void => {
+    if (!temporaryExecutablePath) return;
+    try { fs.unlinkSync(temporaryExecutablePath); } catch { /* It may already have been removed by the OS. */ }
+    temporaryExecutablePath = undefined;
+  };
+
   const buildResult = (error?: string): LspCheckRun => {
-    const entries = [...diagnosticsByUri.entries()];
-    const sourceDiagnostics = entries.filter(([uri]) => sourceUris.has(uri)).flatMap(([, values]) => values);
-    const metadataDiagnostics = entries.filter(([uri]) => !sourceUris.has(uri)).flatMap(([, values]) => values);
+    const entriesForResult = [...diagnosticsByUri.entries()];
+    const sourceDiagnostics = entriesForResult.filter(([uri]) => sourceUris.has(uri)).flatMap(([, values]) => values);
+    const metadataDiagnostics = entriesForResult.filter(([uri]) => !sourceUris.has(uri)).flatMap(([, values]) => values);
     return {
       diagnostics: [...sourceDiagnostics, ...metadataDiagnostics],
       sourceDiagnostics,
       metadataDiagnostics,
-      filesChecked: sourceFiles.length,
-      timing: {
-        startupMs: initialized ? Math.round(now() - startedAt) : undefined,
-        firstDiagnosticMs,
-        totalMs: Math.round(now() - startedAt),
-      },
+      filesChecked: metadata.sourceFiles.length,
+      timing: { ...timing, totalMs: Math.round(now() - startedAt) },
       connected,
+      diagnosticMode,
+      protocol: {
+        ...protocol,
+        serverCapabilities: protocol.serverCapabilities ? cloneRecord(protocol.serverCapabilities) : undefined,
+        pullDiagnosticCompleted: pullCompleted,
+      },
+      childProcessId: child.pid ?? undefined,
+      spawnedExecutablePath,
+      shutdownClean,
       error,
     };
   };
@@ -288,66 +501,114 @@ export async function runVerseLspCheck(
     if (killTimer) clearTimeout(killTimer);
     for (const entry of pending.values()) entry.reject(new Error('Verse language server stopped.'));
     pending.clear();
+    cleanupTemporaryExecutable();
     resolveRun(buildResult(error));
+  };
+
+  const finalizeShutdown = (error?: string): void => {
+    if (shutdownStartedAt !== undefined) timing.shutdownMs = Math.round(now() - shutdownStartedAt);
+    // A semantic-mode error (for example, unsupported pull diagnostics) does not make an
+    // otherwise successful JSON-RPC shutdown unclean.
+    if (shutdownResponseReceived && childExited) shutdownClean = true;
+    resolveFinished(error);
   };
 
   const complete = (error?: string): void => {
     if (finished || shutdownSent) return;
     shutdownSent = true;
+    resolveError = error;
     if (!initialized) {
       resolveFinished(error);
       stopProcess();
       return;
     }
+    shutdownStartedAt = now();
     request('shutdown', null).then(() => {
+      shutdownResponseReceived = true;
       send({ jsonrpc: '2.0', method: 'exit' });
       child.stdin.end();
-      resolveFinished(error);
+      if (childExited) {
+        finalizeShutdown(resolveError);
+        return;
+      }
+      killTimer = setTimeout(() => {
+        stopProcess();
+        finalizeShutdown(resolveError ?? 'Verse language server did not shut down cleanly.');
+      }, Math.max(100, options.shutdownTimeoutMs ?? SHUTDOWN_TIMEOUT_MS));
     }).catch(() => {
-      resolveFinished(error ?? 'Verse language server shutdown failed.');
+      finalizeShutdown(resolveError ?? 'Verse language server shutdown failed.');
       stopProcess();
     });
-    killTimer = setTimeout(() => {
-      resolveFinished(error ?? 'Verse language server did not shut down cleanly.');
-      stopProcess();
-    }, 1000);
+  };
+
+  // Push diagnostics are notifications, not a complete-report protocol. Epic's server omits
+  // empty publications for clean source files, so absence of a source notification is not an
+  // error in push mode. Workspace and pull modes have an explicit completion signal; pull still
+  // requires one response per opened source document.
+  const sourceDiagnosticsComplete = (): boolean => diagnosticMode !== 'pull'
+    || expectedSourceUris.every(uri => diagnosticsByUri.has(uri) || publishedUris.has(uri));
+  const diagnosticRequestsComplete = (): boolean => {
+    const workspaceComplete = (diagnosticMode !== 'workspace' && diagnosticMode !== 'both') || workspaceReportReceived;
+    const pullComplete = diagnosticMode !== 'pull' || (pullCapabilityResolved && pullCompleted >= pullExpected);
+    return workspaceComplete && pullComplete;
   };
 
   const finishWhenSettled = (): void => {
-    if (!workspaceReportReceived && sourceUris.size > 0 && [...sourceUris].some(uri => !diagnosticsByUri.has(uri))) return;
+    if (!sourceDiagnosticsComplete() || !diagnosticRequestsComplete() || analysisSettled || finished || shutdownSent) return;
     if (settleTimer) clearTimeout(settleTimer);
     settleTimer = setTimeout(() => {
+      analysisSettled = true;
+      timing.analysisSettledMs = Math.round(now() - startedAt);
       complete();
     }, settleMs);
   };
 
   const startQuietFallback = (): void => {
     if (quietTimer) clearTimeout(quietTimer);
-    quietTimer = setTimeout(() => complete(), Math.max(settleMs, options.quietMs ?? DIAGNOSTIC_QUIET_MS));
+    quietTimer = setTimeout(() => {
+      if (analysisSettled || finished || shutdownSent) return;
+      analysisSettled = true;
+      timing.analysisSettledMs = Math.round(now() - startedAt);
+      const missingSource = diagnosticMode === 'pull' && !sourceDiagnosticsComplete();
+      const missingRequest = !diagnosticRequestsComplete();
+      const error = missingSource
+        ? 'Verse language server did not publish diagnostics for every source file before the quiet-period deadline.'
+        : missingRequest
+          ? 'Verse language server did not complete the requested diagnostic report before the quiet-period deadline.'
+          : undefined;
+      complete(error);
+    }, Math.max(settleMs, options.quietMs ?? DIAGNOSTIC_QUIET_MS));
   };
 
   const handleMessage = (message: LspMessage): void => {
     const id = typeof message.id === 'number' || typeof message.id === 'string' ? message.id : undefined;
     const method = typeof message.method === 'string' ? message.method : undefined;
+    if (method) protocol.serverMethods.push(method);
     if (method && id !== undefined) {
+      protocol.serverRequests.push(method);
       if (method === 'workspace/configuration') {
-        const items = message.params && typeof message.params === 'object' && Array.isArray((message.params as { items?: unknown }).items)
-          ? (message.params as { items: unknown[] }).items
-          : [];
-        send({ jsonrpc: '2.0', id, result: items.map(() => null) });
+        const params = isObject(message.params) && Array.isArray(message.params.items) ? message.params.items : [];
+        const items = params.filter(isObject);
+        for (const item of items) protocol.configurationSections.push(typeof item.section === 'string' ? item.section : null);
+        send({ jsonrpc: '2.0', id, result: items.map(item => configurationFor(options, item)) });
       } else {
+        if (method === 'client/registerCapability' && isObject(message.params) && Array.isArray(message.params.registrations)) {
+          for (const registration of message.params.registrations) {
+            if (isObject(registration) && typeof registration.method === 'string') protocol.registrations.push(registration.method);
+          }
+        }
         send({ jsonrpc: '2.0', id, result: null });
       }
       return;
     }
-    if (method === 'textDocument/publishDiagnostics' && message.params && typeof message.params === 'object') {
-      // Epic may publish a final empty set while it is tearing down. Preserve the analysis snapshot.
+    if (method === 'textDocument/publishDiagnostics' && isObject(message.params)) {
       if (shutdownSent) return;
-      const params = message.params as { uri?: unknown; diagnostics?: unknown };
-      if (typeof params.uri !== 'string') return;
-      const diagnostics = Array.isArray(params.diagnostics) ? normalizeLspDiagnostics(params.uri, params.diagnostics) : [];
-      diagnosticsByUri.set(diagnosticKey(params.uri), diagnostics);
-      if (firstDiagnosticMs === undefined) firstDiagnosticMs = Math.round(now() - startedAt);
+      const uri = message.params.uri;
+      if (typeof uri !== 'string') return;
+      const values = Array.isArray(message.params.diagnostics) ? message.params.diagnostics : [];
+      diagnosticsByUri.set(diagnosticKey(uri), normalizeLspDiagnostics(uri, values));
+      publishedUris.add(diagnosticKey(uri));
+      if (timing.firstDiagnosticMs === undefined) timing.firstDiagnosticMs = Math.round(now() - startedAt);
       finishWhenSettled();
       return;
     }
@@ -360,9 +621,56 @@ export async function runVerseLspCheck(
     }
   };
 
+  let executableForSpawn = executablePath;
+  try {
+    if (options.copyExecutableToTemp ?? true) {
+      temporaryExecutablePath = copiedExecutable(executablePath);
+      executableForSpawn = temporaryExecutablePath;
+    }
+    spawnedExecutablePath = executableForSpawn;
+    child = (options.spawnProcess ?? defaultSpawn)(executableForSpawn, {
+      cwd: rootPath ?? metadata.contentPath,
+      args: options.serverArguments,
+      env: options.environment ?? { ...process.env },
+    });
+    if (child.pid !== undefined) options.onSpawn?.({
+      pid: child.pid,
+      executablePath: executableForSpawn,
+      cwd: rootPath ?? metadata.contentPath,
+    });
+    timing.spawnMs = Math.round(now() - startedAt);
+  } catch (error) {
+    cleanupTemporaryExecutable();
+    timing.totalMs = Math.round(now() - startedAt);
+    return {
+      diagnostics: [],
+      sourceDiagnostics: [],
+      metadataDiagnostics: [],
+      filesChecked: 0,
+      timing,
+      connected: false,
+      diagnosticMode,
+      protocol,
+      spawnedExecutablePath,
+      shutdownClean: false,
+      error: error instanceof Error ? `Could not start Verse language server: ${error.message}` : 'Could not start Verse language server.',
+    };
+  }
+
+  const shutdownOnExit = (code: number | null): void => {
+    childExited = true;
+    if (shutdownSent) {
+      if (shutdownResponseReceived) finalizeShutdown(resolveError);
+      else finalizeShutdown(resolveError ?? 'Verse language server exited during shutdown.');
+      return;
+    }
+    if (!finished) resolveFinished(initialized ? 'Verse language server exited before diagnostics settled.' : 'Verse language server exited before initialization.');
+    void code;
+  };
+
   child.stdout.on('data', chunk => {
     try {
-      for (const body of decoder.push(chunk)) {
+      for (const body of decoder.push(Buffer.from(chunk))) {
         try {
           handleMessage(JSON.parse(body) as LspMessage);
         } catch {
@@ -374,60 +682,109 @@ export async function runVerseLspCheck(
     }
   });
   child.stderr.on('data', () => undefined);
-  child.on('error', error => {
-    resolveFinished(`Verse language server process failed: ${error.message}`);
-  });
-  child.on('exit', () => {
-    if (killTimer) clearTimeout(killTimer);
-    if (!finished) resolveFinished(initialized ? 'Verse language server exited before diagnostics settled.' : 'Verse language server exited before initialization.');
-  });
+  child.on('error', error => resolveFinished(`Verse language server process failed: ${error.message}`));
+  child.on('exit', shutdownOnExit);
 
   timeoutTimer = setTimeout(() => {
     complete('Verse language server timed out before diagnostics settled.');
   }, timeoutMs);
 
   try {
+    initializeStartedAt = now();
     const initializeResult = await request('initialize', {
       processId: process.pid,
-      clientInfo: { name: 'uefn-verse-compiler', version: '0.1.0' },
-      rootUri: workspaceFolders.length === 1 ? workspaceFolders[0].uri : null,
-      capabilities: {
-        workspace: {
-          configuration: true,
-          workspaceFolders: true,
-          didChangeWatchedFiles: { dynamicRegistration: true },
-        },
-        textDocument: {
-          publishDiagnostics: { relatedInformation: true },
-          synchronization: { dynamicRegistration: true, didSave: true },
-        },
-        window: { workDoneProgress: true },
-      },
-      workspaceFolders,
+      rootPath,
+      rootUri,
+      capabilities: mergeRecords(officialClientCapabilities(), options.clientCapabilities ?? {}),
+      initializationOptions: options.initializationOptions,
+      trace: 'off',
+      workspaceFolders: workspaceFolders.length > 0 ? workspaceFolders : null,
     });
-    if (!initializeResult || typeof initializeResult !== 'object') throw new Error('Verse language server did not return initialization data.');
+    timing.initializeMs = Math.round(now() - initializeStartedAt);
+    timing.startupMs = Math.round(now() - startedAt);
+    if (!isObject(initializeResult)) throw new Error('Verse language server did not return initialization data.');
     connected = true;
     initialized = true;
+    if (isObject(initializeResult.capabilities)) {
+      protocol.serverCapabilities = initializeResult.capabilities;
+      const diagnosticProvider = initializeResult.capabilities.diagnosticProvider;
+      protocol.workspaceDiagnosticAdvertised = Boolean(isObject(diagnosticProvider) && diagnosticProvider.workspaceDiagnostics === true);
+      protocol.textDocumentDiagnosticAdvertised = Boolean(isObject(diagnosticProvider));
+    }
     send({ jsonrpc: '2.0', method: 'initialized', params: {} });
-    for (const sourceFile of sourceFiles) {
+    for (const sourceFile of metadata.sourceFiles) {
       const uri = workspaceUri(sourceFile);
       const text = sourceOverrides.get(normalizePath(sourceFile)) ?? await readFile(sourceFile, 'utf8');
       send({ jsonrpc: '2.0', method: 'textDocument/didOpen', params: { textDocument: { uri, languageId: 'verse', version: 1, text } } });
-      send({ jsonrpc: '2.0', method: 'textDocument/didChange', params: { textDocument: { uri, version: 2 }, contentChanges: [{ text }] } });
+      if (options.sendDidChange ?? true) {
+        send({ jsonrpc: '2.0', method: 'textDocument/didChange', params: { textDocument: { uri, version: 2 }, contentChanges: [{ text }] } });
+      }
     }
-    if (sourceFiles.length === 0) finishWhenSettled();
+    if (metadata.sourceFiles.length === 0) finishWhenSettled();
     else {
       startQuietFallback();
-      request('workspace/diagnostic', { previousResultIds: [] }).then(value => {
-        const entries = workspaceDiagnosticEntries(value);
-        if (!value || typeof value !== 'object' || !Array.isArray((value as { items?: unknown }).items)) return;
-        workspaceReportReceived = true;
-        for (const entry of entries) {
-          diagnosticsByUri.set(diagnosticKey(entry.uri), normalizeLspDiagnostics(entry.uri, entry.values));
-          if (firstDiagnosticMs === undefined) firstDiagnosticMs = Math.round(now() - startedAt);
+      if (diagnosticMode === 'workspace' || diagnosticMode === 'both') {
+        protocol.workspaceDiagnosticRequested = true;
+        workspaceStartedAt = now();
+        request('workspace/diagnostic', { previousResultIds: [] }).then(value => {
+          if (timing.firstDiagnosticMs === undefined) timing.firstDiagnosticMs = Math.round(now() - startedAt);
+          workspaceReportReceived = true;
+          if (isObject(value) && Array.isArray(value.items)) {
+            for (const entry of workspaceDiagnosticEntries(value)) {
+              diagnosticsByUri.set(diagnosticKey(entry.uri), normalizeLspDiagnostics(entry.uri, entry.values));
+            }
+          } else {
+            protocol.workspaceDiagnosticError = 'Verse language server returned an invalid workspace diagnostic report.';
+          }
+          if (workspaceStartedAt !== undefined) timing.workspaceDiagnosticMs = Math.round(now() - workspaceStartedAt);
+          protocol.workspaceDiagnosticCompleted = true;
+          if (protocol.workspaceDiagnosticError) complete(protocol.workspaceDiagnosticError);
+          else finishWhenSettled();
+        }).catch(error => {
+          protocol.workspaceDiagnosticCompleted = true;
+          if (workspaceStartedAt !== undefined) timing.workspaceDiagnosticMs = Math.round(now() - workspaceStartedAt);
+          protocol.workspaceDiagnosticError = error instanceof Error ? error.message : 'workspace/diagnostic failed.';
+          complete(protocol.workspaceDiagnosticError);
+        });
+      }
+      if (diagnosticMode === 'pull') {
+        if (!protocol.textDocumentDiagnosticAdvertised) {
+          protocol.pullDiagnosticError = 'The language server did not advertise textDocument/diagnostic support.';
+          pullExpected = 0;
+          pullCompleted = 0;
+          pullCapabilityResolved = true;
+          // Let the server drain the document notifications before issuing shutdown. Some Epic
+          // builds exit the pipe without answering shutdown when it arrives in the same turn as
+          // the initial didChange burst.
+          await new Promise<void>(resolve => setTimeout(resolve, Math.min(settleMs, 500)));
+          complete(protocol.pullDiagnosticError);
+        } else {
+          protocol.pullDiagnosticRequested = true;
+          pullExpected = metadata.sourceFiles.length;
+          pullCapabilityResolved = true;
+          for (const sourceFile of metadata.sourceFiles) {
+            const uri = workspaceUri(sourceFile);
+            request('textDocument/diagnostic', { textDocument: { uri } }).then(value => {
+              const entriesForPull = pullDiagnosticEntries(value);
+              for (const entry of entriesForPull) {
+                const targetUri = entry.uri ?? uri;
+                diagnosticsByUri.set(diagnosticKey(targetUri), normalizeLspDiagnostics(targetUri, entry.values));
+                publishedUris.add(diagnosticKey(targetUri));
+                if (timing.firstDiagnosticMs === undefined) timing.firstDiagnosticMs = Math.round(now() - startedAt);
+              }
+              pullCompleted += 1;
+              protocol.pullDiagnosticCompleted = pullCompleted;
+              finishWhenSettled();
+            }).catch(error => {
+              pullCompleted += 1;
+              protocol.pullDiagnosticCompleted = pullCompleted;
+              protocol.pullDiagnosticError = error instanceof Error ? error.message : 'textDocument/diagnostic failed.';
+              finishWhenSettled();
+            });
+          }
         }
-        finishWhenSettled();
-      }).catch(() => undefined);
+      }
+      finishWhenSettled();
     }
   } catch (error) {
     complete(error instanceof Error ? error.message : 'Verse language server initialization failed.');

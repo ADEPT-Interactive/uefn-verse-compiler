@@ -1,8 +1,8 @@
 import { pathToFileURL } from 'node:url';
 import { checkVerseProject, compileVerseProject, discoverToolchain, discoverVerseCompiler, discoverVerseProjectMetadata, getVerseCompilerStatus } from './index.js';
-import type { SemanticCheckResult, ToolchainSnapshot, VerseCompilerDiagnostic, WorkflowCompileResult } from './types.js';
+import type { LspDiagnosticMode, SemanticCheckResult, ToolchainSnapshot, VerseCompilerDiagnostic, WorkflowCompileResult } from './types.js';
 
-const USAGE = 'Usage: uefn-verse-compiler [discover|status|compile|check|doctor|backends] [--project <path>] [--process-id <pid>] [--timeout-ms <ms>] [--lsp-path <path>] [--include-paths] [--json] [--debug].';
+const USAGE = 'Usage: uefn-verse-compiler [discover|status|compile|check|doctor|backends] [--project <path>] [--process-id <pid>] [--timeout-ms <ms>] [--lsp-path <path>] [--diagnostic-mode <push|workspace|pull|both>] [--include-paths] [--json] [--debug].';
 
 export interface CliOptions {
   command: 'discover' | 'status' | 'compile' | 'check' | 'doctor' | 'backends';
@@ -10,6 +10,7 @@ export interface CliOptions {
   preferredProcessId?: number;
   timeoutMs?: number;
   lspPath?: string;
+  diagnosticMode?: LspDiagnosticMode;
   includePaths: boolean;
   json: boolean;
   debug: boolean;
@@ -22,6 +23,7 @@ export function parseCliArgs(argv: string[]): CliOptions {
   let preferredProcessId: number | undefined;
   let timeoutMs: number | undefined;
   let lspPath: string | undefined;
+  let diagnosticMode: LspDiagnosticMode | undefined;
   let includePaths = false;
   let json = false;
   let debug = false;
@@ -39,13 +41,19 @@ export function parseCliArgs(argv: string[]): CliOptions {
     else if (argument === '--process-id') preferredProcessId = Number(valueFor(index++, '--process-id'));
     else if (argument === '--timeout-ms') timeoutMs = Number(valueFor(index++, '--timeout-ms'));
     else if (argument === '--lsp-path') lspPath = valueFor(index++, '--lsp-path');
+    else if (argument === '--diagnostic-mode') {
+      const value = valueFor(index++, '--diagnostic-mode') as LspDiagnosticMode;
+      if (value !== 'push' && value !== 'workspace' && value !== 'pull' && value !== 'both') throw new Error('--diagnostic-mode must be push, workspace, pull, or both.');
+      diagnosticMode = value;
+    }
     else if (argument === '--help' || argument === '-h') throw new Error(USAGE);
     else throw new Error(`Unknown argument: ${argument}`);
   }
   if (preferredProcessId !== undefined && (!Number.isInteger(preferredProcessId) || preferredProcessId < 1)) throw new Error('--process-id must be a positive integer.');
   if (timeoutMs !== undefined && (!Number.isInteger(timeoutMs) || timeoutMs < 250 || timeoutMs > 120000)) throw new Error('--timeout-ms must be an integer between 250 and 120000.');
   if (lspPath !== undefined && lspPath.trim() === '') throw new Error('--lsp-path must not be empty.');
-  return { command, projectPath, preferredProcessId, timeoutMs, lspPath, includePaths, json, debug };
+  if (diagnosticMode !== undefined && command !== 'check') throw new Error('--diagnostic-mode is only valid with check.');
+  return { command, projectPath, preferredProcessId, timeoutMs, lspPath, diagnosticMode, includePaths, json, debug };
 }
 
 export const EXIT_CODES = {
@@ -125,6 +133,8 @@ function semanticJson(result: SemanticCheckResult): Record<string, unknown> {
     numSourceWarnings: result.numSourceWarnings,
     numMetadataErrors: result.numMetadataErrors,
     numMetadataWarnings: result.numMetadataWarnings,
+    metadataHealth: result.metadataHealth,
+    diagnosticMode: result.diagnosticMode,
     errors: result.diagnostics.filter(diagnostic => diagnostic.severity === 'error'),
     warnings: result.diagnostics.filter(diagnostic => diagnostic.severity === 'warning'),
     diagnostics: result.diagnostics,
@@ -225,6 +235,7 @@ function printSemantic(result: SemanticCheckResult): void {
   process.stdout.write(`${result.status}: ${result.success ? 'success' : result.error ?? 'failed'}\n`);
   process.stdout.write('semantic=true authoritative=false (not an authoritative UEFN build)\n');
   process.stdout.write(`files=${result.filesChecked} errors=${result.numErrors} warnings=${result.numWarnings} source-errors=${result.numSourceErrors} metadata-errors=${result.numMetadataErrors}\n`);
+  process.stdout.write(`metadata-health=${result.metadataHealth} diagnostic-mode=${result.diagnosticMode ?? 'push'}\n`);
   for (const diagnostic of result.diagnostics) process.stdout.write(`${diagnostic.severity ?? 'message'}:${diagnosticLocation(diagnostic)} ${diagnostic.message}\n`);
 }
 
@@ -290,7 +301,12 @@ export async function runCli(argv: string[]): Promise<number> {
         process.stderr.write('check requires --project <path>.\n');
         return EXIT_CODES.invalidArguments;
       }
-      const result = await checkVerseProject({ projectPath: options.projectPath, timeoutMs: options.timeoutMs, lspPath: options.lspPath });
+      const result = await checkVerseProject({
+        projectPath: options.projectPath,
+        timeoutMs: options.timeoutMs,
+        lspPath: options.lspPath,
+        ...(options.diagnosticMode ? { lspOptions: { diagnosticMode: options.diagnosticMode } } : {}),
+      });
       if (options.json) process.stdout.write(`${JSON.stringify(semanticJson(result), null, 2)}\n`);
       else printSemantic(result);
       return exitCodeForStatus(result.status, result.success);

@@ -20,6 +20,8 @@ export type SemanticCheckStatus =
   | 'project-unrecognized'
   | 'check-failed';
 
+export type LspDiagnosticMode = 'push' | 'workspace' | 'pull' | 'both';
+
 export type CompilerBackendId = 'workflow' | 'epic-verse-lsp';
 
 export type CapabilityState = 'yes' | 'no' | 'unknown';
@@ -148,10 +150,24 @@ export interface VerseProjectMetadata {
 }
 
 export interface SemanticCheckTiming {
+  /** Time from starting the check until the LSP child process was spawned. */
+  spawnMs?: number;
+  /** Backwards-compatible time from starting the check until initialize completed. */
   startupMs?: number;
+  /** Time spent waiting for the initialize response. */
+  initializeMs?: number;
+  /** Time from start until the first diagnostic publication/report, including an empty report. */
   firstDiagnosticMs?: number;
+  /** Time spent waiting for workspace/diagnostic, when requested. */
+  workspaceDiagnosticMs?: number;
+  /** Time from start until the source/report completion criteria and quiet period were satisfied. */
+  analysisSettledMs?: number;
+  /** Time spent completing protocol shutdown and child cleanup. */
+  shutdownMs?: number;
   totalMs: number;
 }
+
+export type SemanticMetadataHealth = 'clean' | 'invalid' | 'unverified';
 
 export interface SemanticCheckResult {
   status: SemanticCheckStatus;
@@ -167,6 +183,9 @@ export interface SemanticCheckResult {
   numSourceWarnings: number;
   numMetadataErrors: number;
   numMetadataWarnings: number;
+  /** Whether generated metadata was checked, rejected, or intentionally left unverified. */
+  metadataHealth: SemanticMetadataHealth;
+  diagnosticMode?: LspDiagnosticMode;
   diagnostics: VerseCompilerDiagnostic[];
   sourceDiagnostics: VerseCompilerDiagnostic[];
   metadataDiagnostics: VerseCompilerDiagnostic[];

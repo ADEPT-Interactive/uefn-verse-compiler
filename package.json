@@ -29,6 +29,9 @@
     "test": "tsx --test \"test/**/*.test.ts\"",
     "check": "npm run build && npm test",
     "verse-compile": "tsx src/cli.ts",
+    "accept:lsp": "tsx scripts/accept-lsp.ts",
+    "parity:verse": "tsx scripts/parity-verse.ts",
+    "measure:lsp": "tsx scripts/measure-lsp.ts",
     "prepack": "npm run build"
   },
   "keywords": [

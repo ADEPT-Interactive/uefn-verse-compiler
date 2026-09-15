@@ -26,6 +26,11 @@ export interface ProjectDiscoveryOptions {
   savedVerseProjectRoot?: string;
 }
 
+export interface ProjectWorkspaceFolder {
+  path: string;
+  name: string;
+}
+
 function readJson(filePath: string): unknown {
   return JSON.parse(fs.readFileSync(filePath, 'utf8')) as unknown;
 }
@@ -199,29 +204,54 @@ export function discoverVerseProjectMetadata(projectPath: string, options: Proje
   }
 }
 
-export function workspaceFoldersForProject(metadata: VerseProjectMetadata): string[] {
+export function workspaceFolderEntriesForProject(metadata: VerseProjectMetadata): ProjectWorkspaceFolder[] {
   if (metadata.workspaceFilePath) {
     try {
       const value = readJson(metadata.workspaceFilePath) as { folders?: unknown };
       if (Array.isArray(value.folders)) {
-        const workspacePaths = value.folders.flatMap(folder => {
+        const workspaceEntries = value.folders.flatMap(folder => {
           if (!folder || typeof folder !== 'object') return [];
           const folderPath = (folder as { path?: unknown }).path;
           if (typeof folderPath !== 'string' || !folderPath.trim()) return [];
           const resolved = path.isAbsolute(folderPath) ? folderPath : path.resolve(path.dirname(metadata.workspaceFilePath as string), folderPath);
-          return [resolved];
+          const configuredName = (folder as { name?: unknown }).name;
+          return [{
+            path: resolved,
+            name: typeof configuredName === 'string' && configuredName.trim() ? configuredName : path.basename(resolved),
+          } satisfies ProjectWorkspaceFolder];
         });
-        const existing = [...new Set(workspacePaths.filter(filePath => fs.existsSync(filePath)))];
-        if (existing.length > 0) return existing;
+        const existing = workspaceEntries.filter(entry => fs.existsSync(entry.path));
+        if (existing.length > 0) {
+          const seen = new Set<string>();
+          return existing.filter(entry => {
+            const key = pathKey(entry.path);
+            if (seen.has(key)) return false;
+            seen.add(key);
+            return true;
+          });
+        }
       }
     } catch {
       // Fall back to the package topology when the generated workspace file is stale or malformed.
     }
   }
-  const paths = [metadata.contentPath];
+  const entries: ProjectWorkspaceFolder[] = [{ path: metadata.contentPath, name: path.basename(metadata.contentPath) }];
   if (metadata.packages.length > 0) {
-    for (const packageInfo of metadata.packages) if (packageInfo.directory) paths.push(packageInfo.directory);
+    for (const packageInfo of metadata.packages) {
+      if (packageInfo.directory) entries.push({ path: packageInfo.directory, name: packageInfo.name });
+    }
   }
-  if (metadata.vprojectPath) paths.push(path.dirname(metadata.vprojectPath));
-  return [...new Set(paths.filter(filePath => fs.existsSync(filePath)))];
+  if (metadata.vprojectPath) entries.push({ path: path.dirname(metadata.vprojectPath), name: path.basename(path.dirname(metadata.vprojectPath)) });
+  const seen = new Set<string>();
+  return entries.filter(entry => {
+    if (!fs.existsSync(entry.path)) return false;
+    const key = pathKey(entry.path);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+export function workspaceFoldersForProject(metadata: VerseProjectMetadata): string[] {
+  return workspaceFolderEntriesForProject(metadata).map(entry => entry.path);
 }
