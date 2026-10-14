@@ -2,7 +2,7 @@
 
 ## Setup
 
-Use Windows and Node.js 22.12.0 or a later Node 22 release below 25.
+Use Windows and Node.js 22.12.0 or newer, below Node 25 (the `package.json` engine range). Node 22 is the CI baseline.
 
     npm ci
     npm run check

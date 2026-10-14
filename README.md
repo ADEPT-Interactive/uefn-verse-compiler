@@ -17,7 +17,7 @@ Static syntax checking is not a substitute for the live UEFN compiler. A clean r
 ## Requirements
 
 - Windows. The runtime discovery strategy is Windows-specific.
-- Node.js 22.12.0 or a later Node 22 release below 25.
+- Node.js 22.12.0 or newer, below Node 25 (the `package.json` engine range). The CI baseline is Node 22.
 - UEFN installed and running with the intended Verse-enabled project open.
 
 VS Code is not required. Epic's Verse extension was used as an interoperability reference during development, but this client does not launch VS Code and does not require a VS Code installation at runtime.
