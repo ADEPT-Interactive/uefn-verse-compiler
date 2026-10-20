@@ -2,7 +2,7 @@
 
 ## Setup
 
-Use Windows and Node.js 22.12.0 or a later Node 22 release below 25.
+Use Windows and Node.js 22.12.0 or newer, below Node 25 (Node 22, 23, and 24 are supported).
 
     npm ci
     npm run check

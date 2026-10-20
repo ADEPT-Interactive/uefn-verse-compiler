@@ -11,7 +11,7 @@ Use this skill when a real UEFN compile is required. Static syntax checking, edi
 
 - UEFN must be running.
 - The intended Verse-enabled project must be open in UEFN.
-- Windows and Node.js 22.12.0 or a later Node 22 release below 25 are supported by this tool.
+- Windows and Node.js 22.12.0 or newer, below Node 25 (Node 22, 23, and 24), are required by this tool.
 - VS Code is optional and is not launched or required.
 
 From a repository checkout, use:
