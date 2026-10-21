@@ -1,6 +1,6 @@
 {
   "name": "uefn-verse-compiler",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Independent agent-friendly client for compiling Verse projects against a local UEFN editor session.",
   "type": "module",
   "bin": {
@@ -22,7 +22,7 @@
     "SECURITY.md"
   ],
   "engines": {
-    "node": ">=22.12.0 <25"
+    "node": ">=26.12.1 <27"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
