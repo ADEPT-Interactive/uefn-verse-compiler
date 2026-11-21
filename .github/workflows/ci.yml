@@ -1,14 +1,28 @@
 name: CI
 
+# What runs when (see "CI policy" in CONTRIBUTING.md):
+# - Draft pull requests: nothing. Mark the pull request ready to run CI once.
+# - Ready pull requests and pushes to main: build, test, package check and audit.
+# - Any other branch, or a draft: run it by hand (Actions > CI > Run workflow).
 on:
   push:
+    branches: [main]
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+# A newer commit on a pull request cancels its older run. Other runs get a group of
+# their own, so runs on main are never cancelled and every main commit gets a result.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
 jobs:
   windows:
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     runs-on: windows-latest
     timeout-minutes: 10
     steps:
